@@ -20,6 +20,9 @@ Estrategia de residencia:
 - resto do transformer (proj_in, embedders, token_refiner, cabecas: ~0.7B) bf16
   na GPU, VAEs na GPU, como antes.
 
+Tambem e biblioteca da fabrica noturna (h3_fabrica.py): montar_pipeline() paga o
+setup uma vez e gerar_cena() roda quantas cenas a fila mandar.
+
 Uso: h3_denoise_w4a4.py <cena> [--steps N] [--saida x.mp4]
 """
 import argparse
@@ -42,16 +45,10 @@ def log(m):
   print(f"[h3w4a4] {m}", flush=True)
 
 
-def main():
-  ap = argparse.ArgumentParser()
-  ap.add_argument("cena", choices=sorted(CENAS_H3))
-  ap.add_argument("--steps", type=int, default=None)
-  ap.add_argument("--saida", default=None)
-  args = ap.parse_args()
-  modo_adaln = os.environ.get("H3_ADALN", "offload")
-
-  estado = torch.load(f"{EMB}/{args.cena}.pt", weights_only=False)
-  log(f"estado da fase A: {sorted(estado)}; adaln={modo_adaln}")
+def montar_pipeline(modo_adaln=None, steps_previstos=None):
+  """Paga o setup inteiro (transformer int8 -> swap SVDQ -> residencia -> adaln
+  por modo -> componentes -> VAEs) e devolve (pipe, tr) prontos para N cenas."""
+  modo_adaln = modo_adaln or os.environ.get("H3_ADALN", "offload")
 
   from diffusers import MiniMaxH3Transformer3DModel, ModularPipeline, TorchAoConfig
   from diffusers.modular_pipelines import SequentialPipelineBlocks
@@ -73,7 +70,7 @@ def main():
     "MiniMaxAI/MiniMax-H3", subfolder="transformer", dtype=torch.bfloat16,
     quantization_config=TorchAoConfig(
       Int8WeightOnlyConfig(version=2), modules_to_not_convert=nao_converter))
-  log(f"transformer base em RAM em {time.time()-t0:.0f}s")
+  log(f"transformer base em RAM em {time.time()-t0:.0f}s (adaln={modo_adaln})")
 
   # os 300 linears de bloco viram int4 residente; os originais sao liberados
   load_w4a4_blocks(tr, CKPT, device="cuda")
@@ -97,8 +94,8 @@ def main():
     # ponto, e getattr None deixava so as constantes na tabela). Grid default do
     # modular = 50 pontos, 49 avaliacoes; timesteps do forward = 1 - sigmas[:-1].
     from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
-    t0 = time.time()
-    n_grid = args.steps or 50
+    t_tab = time.time()
+    n_grid = steps_previstos or 50
     cands = {0.0, 1.0}
     for shift in (12.0, 3.0):  # video e audio (scheduler_config.json de cada um)
       sc = MiniMaxH3Scheduler(shift=shift)
@@ -165,7 +162,7 @@ def main():
     gb = sum(s.numel() * 2 for b in tr.transformer_blocks for s in b.adaln_proj.saidas) / 1e9
     log(f"adaln colapsado em tabela: {ts_all.numel()} sigmas (amostra "
         f"{[round(v, 4) for v in ts_all[:4].tolist()]}...) x 3 modalidades, "
-        f"{gb:.2f}GB, {time.time()-t0:.0f}s; denoise nao toca mais os 13B")
+        f"{gb:.2f}GB, {time.time()-t_tab:.0f}s; denoise nao toca mais os 13B")
   else:
     from diffusers.hooks import apply_group_offloading
     for blk in tr.transformer_blocks:
@@ -209,12 +206,19 @@ def main():
       v.to("cuda")
   vram = torch.cuda.memory_allocated() / 1e9
   log(f"fase B W4A4 pronta em {time.time()-t0:.0f}s, VRAM {vram:.1f}GB")
+  return pipe, tr
 
+
+def gerar_cena(pipe, cena, saida, steps=None, seed=2047):
+  """Gera uma cena a partir do estado salvo da fase A. Video em `saida`, audio
+  estereo em .wav ao lado quando o modelo devolver."""
+  estado = torch.load(f"{EMB}/{cena}.pt", weights_only=False)
+  log(f"estado da fase A [{cena}]: {sorted(estado)}")
   kwargs = {k: v for k, v in estado.items()}
-  kwargs["generator"] = torch.Generator().manual_seed(2047)
+  kwargs["generator"] = torch.Generator().manual_seed(seed)
   kwargs["num_frames"] = max(124, int(kwargs.get("num_frames") or 0))
-  if args.steps:
-    kwargs["num_inference_steps"] = args.steps
+  if steps:
+    kwargs["num_inference_steps"] = steps
   kwargs["output"] = ["videos", "audio", "sampling_rate"]
 
   t = time.time()
@@ -223,8 +227,7 @@ def main():
   pico = torch.cuda.max_memory_allocated() / 1e9
   log(f"gerado em {dt:.0f}s (pico VRAM {pico:.1f}GB)")
 
-  saida = args.saida or os.path.expanduser(
-    f"~/realtime-diffusion/h3-lab/{args.cena}-w4a4.mp4")
+  saida = os.path.expanduser(saida)
   os.makedirs(os.path.dirname(saida), exist_ok=True)
   from diffusers.utils import export_to_video
   if isinstance(res, dict):
@@ -250,6 +253,20 @@ def main():
     except Exception as e:
       log(f"audio nao salvo: {type(e).__name__}: {e}")
   log(f"saida: {saida}")
+  return saida
+
+
+def main():
+  ap = argparse.ArgumentParser()
+  ap.add_argument("cena", choices=sorted(CENAS_H3))
+  ap.add_argument("--steps", type=int, default=None)
+  ap.add_argument("--saida", default=None)
+  args = ap.parse_args()
+
+  pipe, _ = montar_pipeline(steps_previstos=args.steps)
+  saida = args.saida or os.path.expanduser(
+    f"~/realtime-diffusion/h3-lab/{args.cena}-w4a4.mp4")
+  gerar_cena(pipe, args.cena, saida, steps=args.steps)
 
 
 if __name__ == "__main__":
