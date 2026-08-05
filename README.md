@@ -53,6 +53,44 @@ Around sixteen minutes per 5.2 second clip, soundtrack generated jointly in the 
 
 The live path of this transformer is about 19.3B parameters of block linears across six projections per layer. The FFN is a SwiGLU with the gate and up projections shipped fused, and the attention projections arrive split in the diffusers layout. An earlier revision of this README undercounted the FFN and claimed 15.4B and 7.7GB, this paragraph is the correction. Our SVDQuant lineage, the same pipeline behind the Krea 2 Turbo port and the krea-realtime-bench W4A4 work, puts the corrected target near 9.6GB in int4 with a rank 32 branch. The 13B of per-layer AdaLN are precomputable per timestep. The port begins where this baseline ends.
 
+## The W4A4 port, done (2026-08-05)
+
+The paragraph above stopped being a plan. The 50 blocks now run as SVDQuant W4A4 through nunchaku kernels, weights and activations in int4, resident on the GPU.
+
+The pipeline, four scripts on top of the baseline recipe.
+
+```bash
+python h3_collect.py               # L2, activation stats from REAL generation
+python h3_ptq.py                   # L3, SVDQuant calibration, 50 blocks, 24 min
+python h3_convert.py               # L4a, nunchaku two-file checkpoint, 27 s
+python h3_denoise_w4a4.py <scene>  # L4b, phase B with int4 blocks resident
+```
+
+`h3_collect.py` hooks the 300 target linears during real generation and keeps channelwise absmax plus token reservoirs. `h3_ptq.py` is the calibration inline and self contained, smooth grid by simulated W4A4 error, rank 32 branch, sint4 group 64, median relative error 0.14 across 200 groups. `h3_convert.py` slices the shared qkv branch per projection and emits the standard nunchaku block checkpoint, 10.58GB. `h3_w4a4_loader.py` swaps the six diffusers linears per block for `SVDQW4A4Linear` behind a 2D wrapper, because H3 runs a packed 2D sequence and the nunchaku forward wants 3D.
+
+### Numbers (same 4090, same scenes, same seed)
+
+| | int8 offload baseline | W4A4 |
+|---|---|---|
+| denoise step, 49 steps | ~14 to 15 s | **8.0 s** |
+| one clip, 124 frames with stereo audio | ~950 s | **624 s** |
+| VRAM resident | streaming, ~1 block at a time | **13.0 GB** |
+| VRAM peak | ~20 GB | 18.6 GB |
+| phase B setup | ~83 s | 88 s |
+
+What sits where. The int4 blocks and their rank 32 branches live on the GPU whole. The 13B of AdaLN stay int8 on the host behind a leaf offload hook. The video VAE, which weighs 9.8GB and surprises everyone, streams the same way and only pays at decode. Everything else is bf16 resident. Quality holds by eye across the scene bench, trajectories diverge from the bf16 path as any 49 step rollout does under perturbation, coherence and detail do not drop.
+
+This runs on Ampere and Ada. The two NVFP4 quantizations of H3 on the Hub require a Blackwell GPU and quantize weights only, or mark their W4A4 variants experimental with admitted degradation. As far as the public record shows this is the first working weights-and-activations int4 of H3 on the GPUs people already own.
+
+### The new traps
+
+9. **The repo ships two transformers.** `FL2VA/transformer` is the reference sibling in the original fused layout. The runtime executes the root `transformer/`, already in diffusers layout, different weights, max elementwise gap 2.37. Calibrate the root or you calibrate a ghost. Nothing warns you. Shapes match, calibration error looks healthy, the pipeline completes, the output is pure noise. Only the eye catches it.
+10. nunchaku wheels are ABI locked to the torch minor. 1.2.1 wants torch 2.8 and dies with a C++ traceback under 2.11. The 1.3.0.dev wheels cover torch 2.11 and drop into the same venv.
+11. Without the group offload hook at the model root, nothing moves your CPU state tensors to the GPU at the transformer boundary. One `forward_pre_hook` restores the old contract.
+12. With the blocks resident the video VAE no longer fits beside them. Leaf offload it and the cost lands only on decode.
+
+Next. The AdaLN table collapse, the projections reduce to a small per-timestep table, which kills the last 13GB of host streaming and should pull the step under 8 seconds. Then the 3090 in the venue.
+
 ## Lineage
 
 [Krea 2 Turbo W4A4 port](https://github.com/nunchaku-ai/nunchaku/pull/947) then [krea-realtime-bench](https://github.com/sztlink/krea-realtime-bench) then this. Code MIT. The MiniMax H3 weights carry their own community license, read it, four territories are excluded.
