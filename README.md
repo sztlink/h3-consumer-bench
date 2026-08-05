@@ -51,7 +51,7 @@ Around sixteen minutes per 5.2 second clip, soundtrack generated jointly in the 
 
 ## What comes next
 
-The live path of this transformer is about 15.4B parameters of block linears (the FFN is a plain MLP and the qkv projection ships fused). Our SVDQuant lineage, the same pipeline behind the Krea 2 Turbo port and the krea-realtime-bench W4A4 work, puts that near 7.7GB in int4 with a rank 32 branch. The 13B of per-layer AdaLN are precomputable per timestep. The port begins where this baseline ends.
+The live path of this transformer is about 19.3B parameters of block linears across six projections per layer. The FFN is a SwiGLU with the gate and up projections shipped fused, and the attention projections arrive split in the diffusers layout. An earlier revision of this README undercounted the FFN and claimed 15.4B and 7.7GB, this paragraph is the correction. Our SVDQuant lineage, the same pipeline behind the Krea 2 Turbo port and the krea-realtime-bench W4A4 work, puts the corrected target near 9.6GB in int4 with a rank 32 branch. The 13B of per-layer AdaLN are precomputable per timestep. The port begins where this baseline ends.
 
 ## Lineage
 
