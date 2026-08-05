@@ -89,7 +89,21 @@ This runs on Ampere and Ada. The two NVFP4 quantizations of H3 on the Hub requir
 11. Without the group offload hook at the model root, nothing moves your CPU state tensors to the GPU at the transformer boundary. One `forward_pre_hook` restores the old contract.
 12. With the blocks resident the video VAE no longer fits beside them. Leaf offload it and the cost lands only on decode.
 
-Next. The AdaLN table collapse, the projections reduce to a small per-timestep table, which kills the last 13GB of host streaming and should pull the step under 8 seconds. Then the 3090 in the venue.
+### The AdaLN collapse, done (same day)
+
+The sigma schedule of both schedulers is deterministic, video shift 12 and audio shift 3, timesteps are `1 - sigmas[:-1]`, and the default grid of 50 points drives 49 evaluations. So the six modulation outputs of every block are precomputable for the whole run. `H3_ADALN=table` builds them straight from the bf16 shards in 10 seconds, 98 sigmas times 3 modalities, 0.95GB on the GPU, exact bf16 math where the streamed path ran int8. `adaln_proj` becomes a nearest-row lookup on the temb table that fails loudly on any unexpected schedule.
+
+| | W4A4, AdaLN streamed | W4A4, AdaLN table |
+|---|---|---|
+| denoise step | 8.0 s | **3.65 s** |
+| one clip | 624 s | **408 s** |
+| VRAM resident / peak | 13.0 / 18.6 GB | 14.0 / 19.6 GB |
+
+The denoise loop no longer touches host memory at all, and phase B drops the 13B of AdaLN from RAM entirely. Two build traps. The int8 path leaks dequant buffers if you compute the table through the quantized modules, read the shards directly instead. And the partial pipeline has no schedulers loaded at swap time, construct them from the class with the two shifts from the repo configs.
+
+Checkpoint on the Hub. [felipesztutman/MiniMax-H3-W4A4](https://huggingface.co/felipesztutman/MiniMax-H3-W4A4)
+
+Next, the 3090 in the venue.
 
 ## Lineage
 
