@@ -108,3 +108,5 @@ Next, the 3090 in the venue.
 ## Lineage
 
 [Krea 2 Turbo W4A4 port](https://github.com/nunchaku-ai/nunchaku/pull/947) then [krea-realtime-bench](https://github.com/sztlink/krea-realtime-bench) then this. Code MIT. The MiniMax H3 weights carry their own community license, read it, four territories are excluded.
+
+This code is an organ of Arquivo Terra Viva, a machine that writes a novel, prints it line by line on a dot matrix printer, and paints a 4.8m wall with it in Rio de Janeiro. No cloud in the room. [heretica.xyz](https://heretica.xyz)
